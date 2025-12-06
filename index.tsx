@@ -1,23 +1,34 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI } from "@google/genai";
+// @ts-ignore
+import JSZip from 'jszip';
+// @ts-ignore
+import ReactCrop, { Crop, PixelCrop, centerCrop, makeAspectCrop } from 'react-image-crop';
 
 // --- Types & Constants ---
 
-type ImageVariantType = 
-  | 'front' 
-  | 'side' 
-  | '45-degree' 
-  | 'lifestyle' 
-  | 'dark-luxury' 
-  | 'macro' 
-  | 'flatlay';
+type Category = 
+  | 'Core Product Angles'
+  | 'Detail / Close-Up Shots'
+  | 'Functionality & Context'
+  | 'Packaging & Presentation'
+  | 'Variations & Format Deliverables'
+  | 'Lifestyle & Creative Shots'
+  | 'Signature Creative Shots';
+
+interface VariantDef {
+  id: string;
+  title: string;
+  category: Category;
+  promptSuffix: string;
+  defaultSelected?: boolean;
+}
 
 type AspectRatio = '1:1' | '16:9' | '4:3' | '3:4' | '9:16';
-type ImageResolution = '1K' | '2K' | '4K';
 
 interface ImageResult {
-  id: ImageVariantType;
+  id: string;
   title: string;
   description: string;
   status: 'idle' | 'loading' | 'complete' | 'error';
@@ -26,329 +37,536 @@ interface ImageResult {
   errorMsg?: string;
 }
 
-const VARIANTS: { id: ImageVariantType; title: string; promptSuffix: string }[] = [
-  {
-    id: 'front',
-    title: 'Front View',
-    promptSuffix: "Front view: High-resolution 8K photorealistic shot of the product, centered, pure white background (#FFFFFF), soft shadows, f/1.8, 85mm."
-  },
-  {
-    id: 'side',
-    title: 'Side View',
-    promptSuffix: "Side view: High-resolution 8K photorealistic shot of the product from the side, centered, pure white background (#FFFFFF), soft shadows, f/1.8, 85mm."
-  },
-  {
-    id: '45-degree',
-    title: '45-Degree Hero',
-    promptSuffix: "45-degree angle hero shot: High-resolution 8K photorealistic shot of the product at a 45-degree angle, centered, pure white background (#FFFFFF), soft shadows, f/1.8, 85mm."
-  },
-  {
-    id: 'lifestyle',
-    title: 'Lifestyle Context',
-    promptSuffix: "Lifestyle image: High-resolution 8K photorealistic image of the product in a realistic, relevant real-world use setting, soft lighting."
-  },
-  {
-    id: 'dark-luxury',
-    title: 'Dark Luxury Studio',
-    promptSuffix: "Dark Luxury Studio Shot: High-resolution 8K photorealistic shot of the product in a luxurious, dark studio environment (e.g., black marble surface, mood lighting), soft reflections."
-  },
-  {
-    id: 'macro',
-    title: 'Macro Detail',
-    promptSuffix: "Macro Detail Shot: High-resolution 8K photorealistic extreme close-up (macro) shot highlighting a specific texture or intricate detail of the product, soft studio lighting, pure white background (#FFFFFF) or relevant contextual background."
-  },
-  {
-    id: 'flatlay',
-    title: 'Top-Down Flatlay',
-    promptSuffix: "Top-Down Flatlay: High-resolution 8K photorealistic top-down (flatlay) shot of the product, centered, soft lighting, pure white background (#FFFFFF)."
-  }
+// --- Variant Library (Preserved) ---
+
+const VARIANTS_LIB: VariantDef[] = [
+  // 1️⃣ Core Product Angles
+  { id: 'core-front', title: 'Front Shot', category: 'Core Product Angles', promptSuffix: "Aesthetic Front Shot: High-resolution 8K photorealistic shot of the product, perfectly centered, pure white background (#FFFFFF), soft even lighting, f/8 aperture for full sharpness." },
+  { id: 'core-back', title: 'Back Shot', category: 'Core Product Angles', promptSuffix: "Aesthetic Back Shot: High-resolution 8K photorealistic shot of the rear of the product, centered, pure white background (#FFFFFF), showing back details clearly." },
+  { id: 'core-left', title: 'Left Side', category: 'Core Product Angles', promptSuffix: "Aesthetic Left Side Shot: High-resolution 8K photorealistic profile view from the left, pure white background (#FFFFFF), soft shadows." },
+  { id: 'core-right', title: 'Right Side', category: 'Core Product Angles', promptSuffix: "Aesthetic Right Side Shot: High-resolution 8K photorealistic profile view from the right, pure white background (#FFFFFF), soft shadows.", defaultSelected: true },
+  { id: 'core-top', title: 'Top View', category: 'Core Product Angles', promptSuffix: "Aesthetic Top View Shot: High-resolution 8K photorealistic top-down view, geometric alignment, pure white background (#FFFFFF).", defaultSelected: true },
+  { id: 'core-bottom', title: 'Bottom View', category: 'Core Product Angles', promptSuffix: "Aesthetic Bottom View Shot: High-resolution 8K photorealistic view of the bottom of the product, pure white background (#FFFFFF)." },
+  { id: 'core-45', title: '45° Hero Angle', category: 'Core Product Angles', promptSuffix: "Aesthetic 45° Hero Angle Shot: High-resolution 8K photorealistic shot at a 45-degree angle, dynamic composition, pure white background (#FFFFFF), soft dramatic shadows." },
+
+  // 2️⃣ Detail / Close-Up Shots
+  { id: 'detail-texture', title: 'Texture Close-Up', category: 'Detail / Close-Up Shots', promptSuffix: "Aesthetic Close-Up (Texture Details): Macro photography, shallow depth of field (f/2.8), focusing intensely on the surface material and texture quality.", defaultSelected: true },
+  { id: 'detail-features', title: 'Features/Ports', category: 'Detail / Close-Up Shots', promptSuffix: "Aesthetic Close-Up (Features/Buttons/Ports): Macro shot highlighting key buttons, ports, or unique functional features, sharp focus." },
+  { id: 'detail-logo', title: 'Logo/Branding', category: 'Detail / Close-Up Shots', promptSuffix: "Aesthetic Close-Up (Logo/Branding): Artistic close-up of the brand logo or nameplate on the product, elegant lighting, premium feel." },
+  { id: 'detail-material', title: 'Material/Stitching', category: 'Detail / Close-Up Shots', promptSuffix: "Aesthetic Close-Up (Material/Stitching): Extreme close-up showing craftsmanship, stitching, or material grain, soft luxury lighting." },
+
+  // 3️⃣ Functionality & Context
+  { id: 'func-use', title: 'Product in Use', category: 'Functionality & Context', promptSuffix: "Aesthetic Product in Use Shot: Photorealistic depiction of the product being actively used in its intended manner, human element implied or visible hands, realistic context.", defaultSelected: true },
+  { id: 'func-demo', title: 'Functional Demo', category: 'Functionality & Context', promptSuffix: "Aesthetic Functional / Demonstration Shot: Shot showing the product's mechanism or main function in action (e.g., screen on, lid open, pouring)." },
+  { id: 'func-scale', title: 'Scale Reference', category: 'Functionality & Context', promptSuffix: "Aesthetic Scale Shot (Hand / Object Reference): Product placed next to a common object or held in hand to visually demonstrate size and scale." },
+  { id: 'func-before-after', title: 'Before & After', category: 'Functionality & Context', promptSuffix: "Aesthetic Before & After Shot: Split composition or conceptual shot showing the problem state vs the solution state provided by the product." },
+
+  // 4️⃣ Packaging & Presentation
+  { id: 'pack-closed', title: 'Box Closed', category: 'Packaging & Presentation', promptSuffix: "Aesthetic Packaging Shot (Box Closed): Pristine retail packaging shot, box closed, studio lighting, white background." },
+  { id: 'pack-open', title: 'Box Open', category: 'Packaging & Presentation', promptSuffix: "Aesthetic Packaging Shot (Box Open): Retail packaging opened to reveal the product inside, inviting presentation." },
+  { id: 'pack-unbox', title: 'Unboxing Sequence', category: 'Packaging & Presentation', promptSuffix: "Aesthetic Unboxing Sequence Shot: An action shot of the unboxing experience, removing lid or protective wrapping, first person perspective." },
+  { id: 'pack-kit', title: 'Full Kit Layout', category: 'Packaging & Presentation', promptSuffix: "Aesthetic Full Kit / Included Contents Layout: Knolling style flat-lay photography of the product and all accessories/manuals arranged neatly on a clean surface." },
+
+  // 5️⃣ Variations & Format Deliverables
+  { id: 'var-group', title: 'Group Shot', category: 'Variations & Format Deliverables', promptSuffix: "Aesthetic Group Shot (Variants / Colors): If applicable, show multiple color variations of the product arranged artistically together." },
+  { id: 'var-size', title: 'Size Comparison', category: 'Variations & Format Deliverables', promptSuffix: "Aesthetic Size Comparison Shot: Clear visual comparison with standard objects to show dimension." },
+  { id: 'var-clean', title: 'Clean E-Comm', category: 'Variations & Format Deliverables', promptSuffix: "Aesthetic White Background Clean E-Commerce Shot: Standardized Amazon-style main listing image, perfectly lit, 100% white background." },
+  { id: 'var-trans', title: 'Transparent BG (Prep)', category: 'Variations & Format Deliverables', promptSuffix: "Aesthetic Transparent Background PNG Shot: Product isolated on a high-contrast solid green or white background for easy background removal." },
+  { id: 'var-square', title: 'Social Square 1:1', category: 'Variations & Format Deliverables', promptSuffix: "Aesthetic Square Social Format Shot (1:1): Instagram-ready lifestyle composition, perfectly balanced in a square frame." },
+  { id: 'var-vertical', title: 'Vertical Video 9:16', category: 'Variations & Format Deliverables', promptSuffix: "Aesthetic Vertical Video Format Shot (9:16): Tall composition suitable for Stories/TikTok, with negative space for text overlays." },
+
+  // 6️⃣ Lifestyle & Creative Shots
+  { id: 'life-table', title: 'Minimal Tabletop', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Minimal Tabletop Shot: Clean architectural surface (concrete, marble, or wood), hard sunlight shadows, minimal props.", defaultSelected: true },
+  { id: 'life-bath', title: 'Kitchen/Bathroom', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Kitchen / Bathroom Shot: Product placed in a high-end kitchen or spa-like bathroom environment, realistic moisture or steam details if applicable." },
+  { id: 'life-desk', title: 'Desk Setup', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Desk / Workspace Setup Shot: Tech-focused or productivity setup, product on a desk with keyboard, mouse, and coffee, depth of field." },
+  { id: 'life-bed', title: 'Bedroom/Soft', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Bedroom / Soft Texture Shot: Product on soft linen sheets or cozy duvet, warm inviting morning light, relaxed atmosphere." },
+  { id: 'life-outdoor', title: 'Outdoor Natural', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Outdoor Natural Light Shot: Product outdoors, golden hour lighting, nature bokeh background (forest, beach, or park)." },
+  { id: 'life-urban', title: 'Urban/Café', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Urban / Café Shot: Product on a café table or urban street setting, city life background blur, trendy vibe." },
+  { id: 'life-bag', title: 'In-Bag/Pocket', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Pocket / Bag Portability Shot: Product peeking out of a stylish backpack, tote, or pocket, implying portability." },
+  { id: 'life-morning', title: 'Morning Ritual', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Morning Ritual Shot: Morning vibes, sunlight streaming through blinds, coffee cup, book, peaceful start to the day.", defaultSelected: true },
+  { id: 'life-night', title: 'Night Mood', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Night Mood Shot: Dark mode aesthetic, neon city lights reflection or warm bedside lamp lighting, moody and cozy." },
+  { id: 'life-seasonal', title: 'Seasonal Theme', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Seasonal / Festive Theme Shot: Subtle holiday props (e.g., pinecone for winter, flower for spring) styling the product." },
+  { id: 'life-flatlay', title: 'Styled Flat Lay', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Flat Lay Shot With Props: Top-down view with curated props relevant to the product's niche, artistic arrangement.", defaultSelected: true },
+  { id: 'life-shelf', title: 'Shelf Display', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Shelf Display Shot: Product sitting on a floating shelf or retail display, organized interior design context." },
+  { id: 'life-pov', title: 'POV Shot', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Over-the-Shoulder POV Shot: First-person view looking down at the product in hands or on lap." },
+  { id: 'life-candid', title: 'Candid Natural', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Candid Natural Placement Shot: Product left casually on a side table or couch, looking lived-in and authentic." },
+  { id: 'life-move', title: 'Movement', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Shot With Movement: Freeze-frame action, steam rising, water splashing, or fabric flowing around the product." },
+  { id: 'life-hand', title: 'Hand-Holding', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Hand-Holding Shot: A diverse hand model holding the product naturally, showing grip and ergonomics." },
+  { id: 'life-model', title: 'Model Interaction', category: 'Lifestyle & Creative Shots', promptSuffix: "Aesthetic Model Interaction Shot: A model interacting with the product in the background, shallow depth of field focus on product.", defaultSelected: true },
+
+  // 7️⃣ Signature Creative Shots
+  { id: 'sig-hero', title: 'Hero Creative', category: 'Signature Creative Shots', promptSuffix: "Aesthetic Hero Creative Shot: Award-winning advertising photography style, bold colors, dramatic composition." },
+  { id: 'sig-float', title: 'Levitation', category: 'Signature Creative Shots', promptSuffix: "Aesthetic Floating / Levitation Shot: The product suspended in mid-air, defying gravity, surreal and magical feel." },
+  { id: 'sig-splash', title: 'Splash/Motion', category: 'Signature Creative Shots', promptSuffix: "Aesthetic Splash / Motion Shot: Dynamic liquid splash or powder explosion around the product (if relevant) or high-speed motion blur background." },
+  { id: 'sig-shadow', title: 'Dramatic Shadow', category: 'Signature Creative Shots', promptSuffix: "Aesthetic Dramatic Shadow Shot: Gobo lighting creating interesting foliage or window blind shadows across the product." },
+  { id: 'sig-brand', title: 'Color Branding', category: 'Signature Creative Shots', promptSuffix: "Aesthetic Color Background Branding Shot: Product on a seamless paper background matching its brand color palette, monochromatic look." },
 ];
 
 const GLOBAL_STYLE = "Main Style: Ultra-sharp studio shot with soft lighting. Camera & Quality Specs: 8K resolution, f/1.8 aperture, 85mm focal length, professional product lighting, DSLR depth-of-field realism. IMPORTANT: No logos, copyright designs, or text.";
 
+// --- Helpers ---
+
+const createImage = (url: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const image = new Image()
+    image.addEventListener('load', () => resolve(image))
+    image.addEventListener('error', (error) => reject(error))
+    image.setAttribute('crossOrigin', 'anonymous') // needed to avoid cross-origin issues on CodeSandbox
+    image.src = url
+  })
+
+async function getCroppedImg(
+  imageSrc: string,
+  pixelCrop: PixelCrop,
+): Promise<string> {
+  const image = await createImage(imageSrc)
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+
+  if (!ctx || !pixelCrop) {
+    return ''
+  }
+
+  // set canvas size to match the crop size
+  canvas.width = pixelCrop.width
+  canvas.height = pixelCrop.height
+
+  // draw image
+  ctx.drawImage(
+    image,
+    pixelCrop.x,
+    pixelCrop.y,
+    pixelCrop.width,
+    pixelCrop.height,
+    0,
+    0,
+    pixelCrop.width,
+    pixelCrop.height
+  )
+
+  // As Base64 string
+  return canvas.toDataURL('image/png');
+}
+
+function centerAspectCrop(
+  mediaWidth: number,
+  mediaHeight: number,
+  aspect: number,
+) {
+  return centerCrop(
+    makeAspectCrop(
+      {
+        unit: '%',
+        width: 90,
+      },
+      aspect,
+      mediaWidth,
+      mediaHeight,
+    ),
+    mediaWidth,
+    mediaHeight,
+  )
+}
+
 // --- Components ---
 
 const Spinner = () => (
-  <svg className="animate-spin h-5 w-5 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+  <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
   </svg>
 );
 
-const EditorModal: React.FC<{ sourceImage: string; onClose: () => void }> = ({ sourceImage, onClose }) => {
-  const [prompt, setPrompt] = useState('');
-  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+const Badge = ({ children, className, variant = 'default' }: { children?: React.ReactNode, className?: string, variant?: 'default' | 'outline' | 'destructive' | 'secondary' }) => {
+  const base = "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2";
+  const variants = {
+    default: "border-transparent bg-zinc-50 text-zinc-900 hover:bg-zinc-50/80",
+    secondary: "border-transparent bg-zinc-800 text-zinc-50 hover:bg-zinc-800/80",
+    destructive: "border-transparent bg-red-900 text-zinc-50 hover:bg-red-900/80",
+    outline: "text-zinc-50 border-zinc-800"
+  };
+  return (
+    <span className={`${base} ${variants[variant]} ${className || ''}`}>
+      {children}
+    </span>
+  );
+};
 
-  const handleEdit = async () => {
-    if (!prompt) return;
-    setIsGenerating(true);
-    setError(null);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      // Ensure we just get the base64 data, removing the prefix if present
-      const base64Data = sourceImage.includes('base64,') ? sourceImage.split('base64,')[1] : sourceImage;
+const RefCropModal: React.FC<{
+    imageUrl: string;
+    onClose: () => void;
+    onSave: (newUrl: string) => void;
+}> = ({ imageUrl, onClose, onSave }) => {
+    const [crop, setCrop] = useState<Crop>();
+    const [completedCrop, setCompletedCrop] = useState<PixelCrop>();
+    const [aspect, setAspect] = useState<number | undefined>(undefined);
+    const imgRef = useRef<HTMLImageElement>(null);
+    const [isSaving, setIsSaving] = useState(false);
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: {
-          parts: [
-            { text: prompt },
-            { 
-              inlineData: { 
-                data: base64Data, 
-                mimeType: 'image/png' 
-              } 
-            }
-          ]
-        }
-      });
-
-      let imageUrl = '';
-      if (response.candidates && response.candidates[0]?.content?.parts) {
-        for (const part of response.candidates[0].content.parts) {
-          if (part.inlineData) {
-            imageUrl = `data:image/png;base64,${part.inlineData.data}`;
-            break;
-          }
-        }
+    // When aspect changes, re-center crop if image is loaded
+    useEffect(() => {
+      if (imgRef.current && aspect) {
+        const { width, height } = imgRef.current;
+        const newCrop = centerAspectCrop(width, height, aspect);
+        setCrop(newCrop);
+        setCompletedCrop(convertToPixelCrop(newCrop, width, height));
       }
+    }, [aspect]);
 
-      if (imageUrl) {
-        setGeneratedImage(imageUrl);
+    // Helper to initialize crop on image load
+    function onImageLoad(e: React.SyntheticEvent<HTMLImageElement>) {
+      if (aspect) {
+        const { width, height } = e.currentTarget;
+        setCrop(centerAspectCrop(width, height, aspect));
       } else {
-        throw new Error("No image generated");
+          // Default crop if no aspect
+           const { width, height } = e.currentTarget;
+           setCrop(centerCrop(
+            makeAspectCrop({ unit: '%', width: 90 }, 1, width, height),
+            width,
+            height
+           ));
       }
-    } catch (err: any) {
-      console.error("Edit failed:", err);
-      setError(err.message || "Failed to edit image");
+    }
+
+    function convertToPixelCrop(crop: Crop, imageWidth: number, imageHeight: number): PixelCrop {
+       return {
+         unit: 'px',
+         x: crop.unit === '%' ? (crop.x / 100) * imageWidth : crop.x,
+         y: crop.unit === '%' ? (crop.y / 100) * imageHeight : crop.y,
+         width: crop.unit === '%' ? (crop.width / 100) * imageWidth : crop.width,
+         height: crop.unit === '%' ? (crop.height / 100) * imageHeight : crop.height
+       };
+    }
+
+    const handleSave = async () => {
+        if (!completedCrop || !imgRef.current) return;
+        try {
+            setIsSaving(true);
+            const img = imgRef.current;
+            
+            // Calculate scale factor between displayed image and natural image
+            const scaleX = img.naturalWidth / img.width;
+            const scaleY = img.naturalHeight / img.height;
+
+            const cropToSave: PixelCrop = {
+                unit: 'px',
+                x: completedCrop.x * scaleX,
+                y: completedCrop.y * scaleY,
+                width: completedCrop.width * scaleX,
+                height: completedCrop.height * scaleY
+            };
+
+            const cropped = await getCroppedImg(imageUrl, cropToSave);
+            onSave(cropped);
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setIsSaving(false);
+        }
+    }
+
+    return (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-zinc-950/90 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+            <div className="relative w-full max-w-4xl h-[80vh] flex flex-col bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl">
+                 {/* Header */}
+                 <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between bg-zinc-900">
+                    <h3 className="text-sm font-medium text-zinc-100">Crop Reference Image</h3>
+                    <div className="flex gap-2">
+                        <div className="flex items-center gap-1 mr-4 border-r border-zinc-700 pr-4 h-7">
+                            <button onClick={() => setAspect(1)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === 1 ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>1:1</button>
+                            <button onClick={() => setAspect(16/9)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === 16/9 ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>16:9</button>
+                            <button onClick={() => setAspect(4/5)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === 4/5 ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>4:5</button>
+                            <button onClick={() => setAspect(undefined)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === undefined ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>Free</button>
+                        </div>
+                        <button onClick={onClose} className="text-xs text-zinc-400 hover:text-zinc-100 px-3 py-1.5 rounded hover:bg-zinc-800 transition-colors">Cancel</button>
+                        <button onClick={handleSave} disabled={isSaving} className="text-xs bg-zinc-100 text-zinc-950 px-3 py-1.5 rounded font-medium hover:bg-zinc-200 transition-colors flex items-center gap-2">
+                            {isSaving && <Spinner />}
+                            Save Crop
+                        </button>
+                    </div>
+                 </div>
+                 
+                 {/* Cropper */}
+                 <div className="flex-1 relative bg-[#0F1115] overflow-auto flex items-center justify-center p-4">
+                    <ReactCrop
+                        crop={crop}
+                        onChange={(c) => setCrop(c)}
+                        onComplete={(c) => setCompletedCrop(c)}
+                        aspect={aspect}
+                    >
+                        <img 
+                            ref={imgRef} 
+                            src={imageUrl} 
+                            alt="Reference" 
+                            onLoad={onImageLoad}
+                            style={{ maxHeight: '65vh' }}
+                        />
+                    </ReactCrop>
+                 </div>
+            </div>
+        </div>
+    );
+}
+
+const ImageModal: React.FC<{ 
+  result: ImageResult; 
+  projectName: string;
+  onClose: () => void;
+  onUpdate: (newUrl: string) => void;
+}> = ({ result, projectName, onClose, onUpdate }) => {
+  const [isCropping, setIsCropping] = useState(false);
+  const [crop, setCrop] = useState<Crop>();
+  const [completedCrop, setCompletedCrop] = useState<PixelCrop>();
+  const [aspect, setAspect] = useState<number | undefined>(undefined);
+  const [isSaving, setIsSaving] = useState(false);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  if (!result.imageUrl) return null;
+
+  // Initialize crop when entering crop mode
+  useEffect(() => {
+    if (isCropping && imgRef.current) {
+        const { width, height } = imgRef.current;
+        const initialCrop = aspect 
+            ? centerAspectCrop(width, height, aspect)
+            : centerCrop(makeAspectCrop({ unit: '%', width: 90 }, 1, width, height), width, height);
+        setCrop(initialCrop);
+    }
+  }, [isCropping, aspect]);
+
+  const handleSaveCrop = async () => {
+    if (!completedCrop || !imgRef.current) return;
+    try {
+      setIsSaving(true);
+      const img = imgRef.current;
+      
+      // Calculate scale factor between displayed image and natural image
+      const scaleX = img.naturalWidth / img.width;
+      const scaleY = img.naturalHeight / img.height;
+
+      const cropToSave: PixelCrop = {
+          unit: 'px',
+          x: completedCrop.x * scaleX,
+          y: completedCrop.y * scaleY,
+          width: completedCrop.width * scaleX,
+          height: completedCrop.height * scaleY
+      };
+
+      const croppedImage = await getCroppedImg(result.imageUrl!, cropToSave);
+      onUpdate(croppedImage);
+      setIsCropping(false);
+    } catch (e) {
+      console.error(e);
     } finally {
-      setIsGenerating(false);
+      setIsSaving(false);
     }
   };
 
+  const fileName = `${(projectName || 'producon').replace(/\s+/g, '-')}-${result.title.replace(/\s+/g, '-').toLowerCase()}.png`;
+
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-md p-4 animate-in fade-in duration-200" onClick={onClose}>
-      <div className="relative max-w-6xl w-full bg-[#111827] border border-gray-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col md:flex-row h-[90vh]" onClick={e => e.stopPropagation()}>
-        
-        {/* Close Button */}
-        <button 
-          onClick={onClose}
-          className="absolute top-4 right-4 z-10 text-gray-400 hover:text-white bg-black/50 hover:bg-red-900/50 rounded-full w-10 h-10 flex items-center justify-center transition-all"
-        >
-          <i className="fa-solid fa-xmark text-xl"></i>
-        </button>
-
-        {/* Left: Image Preview Area */}
-        <div className="flex-1 bg-black/40 relative flex items-center justify-center p-6 border-b md:border-b-0 md:border-r border-gray-800">
-            <div className="flex flex-col gap-4 w-full h-full">
-                <div className="flex-1 relative flex items-center justify-center min-h-0">
-                    {/* Source Image */}
-                    <div className="relative group h-full flex flex-col items-center justify-center">
-                         <span className="absolute top-2 left-2 bg-black/60 text-white text-[10px] px-2 py-1 rounded border border-white/10 z-10">Original</span>
-                         <img src={sourceImage} className="max-h-full max-w-full object-contain rounded-lg shadow-lg" alt="Original" />
-                    </div>
-                </div>
-                
-                {generatedImage && (
-                    <div className="flex-1 relative flex items-center justify-center min-h-0 border-t border-gray-800 pt-4">
-                        {/* Result Image */}
-                        <div className="relative h-full flex flex-col items-center justify-center w-full">
-                            <span className="absolute top-2 left-2 bg-indigo-600/80 text-white text-[10px] px-2 py-1 rounded border border-white/10 z-10">Edited Result</span>
-                            <img src={generatedImage} className="max-h-full max-w-full object-contain rounded-lg shadow-lg border border-indigo-500/30" alt="Edited" />
-                             <a 
-                                href={generatedImage} 
-                                download="edited-image.png"
-                                className="absolute bottom-4 right-4 bg-indigo-600 hover:bg-indigo-500 text-white w-10 h-10 rounded-full flex items-center justify-center shadow-lg transition-all"
-                                title="Download Edit"
-                            >
-                                <i className="fa-solid fa-download"></i>
-                            </a>
-                        </div>
-                    </div>
-                )}
-            </div>
-        </div>
-
-        {/* Right: Controls */}
-        <div className="w-full md:w-[400px] bg-[#1F2937] p-6 flex flex-col">
-            <div className="mb-6">
-                <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                    <i className="fa-solid fa-wand-magic-sparkles text-yellow-400"></i> Magic Editor
-                </h3>
-                <p className="text-sm text-gray-400 mt-1">Use AI to edit your image. Describe the change you want to make.</p>
-            </div>
-
-            <div className="flex-1 flex flex-col gap-4">
-                <div className="space-y-2">
-                    <label className="text-xs font-medium text-gray-300 uppercase">Editing Prompt</label>
-                    <textarea 
-                        className="w-full bg-gray-900 border border-gray-700 rounded-xl p-4 text-sm focus:ring-2 focus:ring-yellow-500/50 focus:border-yellow-500 outline-none text-white resize-none h-32"
-                        placeholder="e.g., Add a retro filter, Make it night time, Remove the background..."
-                        value={prompt}
-                        onChange={(e) => setPrompt(e.target.value)}
-                    />
-                </div>
-
-                {error && (
-                    <div className="bg-red-900/20 border border-red-500/20 text-red-400 text-xs p-3 rounded-lg">
-                        <i className="fa-solid fa-circle-exclamation mr-2"></i>{error}
-                    </div>
-                )}
-
-                <button 
-                    onClick={handleEdit}
-                    disabled={isGenerating || !prompt}
-                    className={`mt-auto w-full py-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all shadow-lg
-                        ${isGenerating || !prompt 
-                            ? 'bg-gray-700 text-gray-500 cursor-not-allowed' 
-                            : 'bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white shadow-orange-900/20'}`}
-                >
-                    {isGenerating ? <><Spinner /> Processing...</> : <><i className="fa-solid fa-bolt"></i> Apply Edit</>}
-                </button>
-            </div>
-            
-            <div className="mt-6 pt-6 border-t border-gray-700">
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <i className="fa-solid fa-bolt text-yellow-500"></i>
-                    <span>Powered by <strong>Gemini 2.5 Flash Image</strong></span>
-                </div>
-            </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const ImageModal: React.FC<{ imageUrl: string; title: string; onClose: () => void; onEdit: () => void }> = ({ imageUrl, title, onClose, onEdit }) => {
-  if (!imageUrl) return null;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-sm p-4 animate-in fade-in duration-200" onClick={onClose}>
-      <div className="relative max-w-7xl max-h-[95vh] w-full h-full flex flex-col items-center justify-center" onClick={e => e.stopPropagation()}>
-         <img src={imageUrl} alt={title} className="max-w-full max-h-[85vh] object-contain rounded-sm shadow-2xl border border-gray-800" />
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-950/90 backdrop-blur-sm p-4 animate-in fade-in duration-200" onClick={onClose}>
+      <div className="relative w-full max-w-6xl h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
          
-         <div className="absolute top-4 right-4 flex gap-3">
-             {/* Edit Button in Lightbox */}
-            <button 
-              onClick={(e) => { e.stopPropagation(); onEdit(); }}
-              className="text-white bg-yellow-600/80 hover:bg-yellow-500 rounded-full w-12 h-12 flex items-center justify-center transition-all border border-white/10 backdrop-blur-md group shadow-lg shadow-yellow-900/20"
-              title="Magic Edit"
-            >
-              <i className="fa-solid fa-wand-magic-sparkles text-lg group-hover:scale-110 transition-transform"></i>
-            </button>
+         {/* Toolbar */}
+         <div className="flex items-center justify-between mb-4 bg-zinc-900/50 p-3 rounded-lg border border-zinc-800 backdrop-blur">
+            <div className="text-zinc-100 font-medium">{result.title}</div>
+            <div className="flex gap-2 items-center">
+               {isCropping ? (
+                  <>
+                    <div className="flex items-center gap-1 mr-2 border-r border-zinc-700 pr-2 h-7">
+                        <button onClick={() => setAspect(1)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === 1 ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>1:1</button>
+                        <button onClick={() => setAspect(16/9)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === 16/9 ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>16:9</button>
+                        <button onClick={() => setAspect(4/5)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === 4/5 ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>4:5</button>
+                        <button onClick={() => setAspect(undefined)} className={`text-[10px] px-2 rounded h-full flex items-center font-medium transition-colors ${aspect === undefined ? 'bg-zinc-100 text-zinc-950' : 'text-zinc-400 hover:text-zinc-200'}`}>Free</button>
+                    </div>
 
-            <a 
-              href={imageUrl} 
-              download={`lumina-${title.replace(/\s+/g, '-').toLowerCase()}.png`}
-              className="text-white bg-gray-800/50 hover:bg-gray-700/80 rounded-full w-12 h-12 flex items-center justify-center transition-all border border-white/10 backdrop-blur-md group"
-              onClick={(e) => e.stopPropagation()}
-              title="Download"
-            >
-              <i className="fa-solid fa-download text-lg group-hover:scale-110 transition-transform"></i>
-            </a>
-            <button 
-              onClick={onClose}
-              className="text-white bg-gray-800/50 hover:bg-red-900/50 rounded-full w-12 h-12 flex items-center justify-center transition-all border border-white/10 backdrop-blur-md group"
-              title="Close"
-            >
-              <i className="fa-solid fa-xmark text-xl group-hover:scale-110 transition-transform"></i>
-            </button>
+                    <button 
+                      onClick={() => setIsCropping(false)}
+                      className="h-9 px-4 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium transition-colors"
+                      disabled={isSaving}
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={handleSaveCrop}
+                      className="h-9 px-4 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors flex items-center gap-2"
+                      disabled={isSaving}
+                    >
+                      {isSaving && <Spinner />}
+                      Apply Crop
+                    </button>
+                  </>
+               ) : (
+                 <>
+                    <button 
+                      onClick={() => setIsCropping(true)}
+                      className="h-9 px-4 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium transition-colors flex items-center gap-2"
+                    >
+                      <i className="fa-solid fa-crop-simple text-xs"></i>
+                      Crop
+                    </button>
+                    <a 
+                      href={result.imageUrl} 
+                      download={fileName}
+                      className="h-9 px-4 inline-flex items-center justify-center rounded-md bg-zinc-100 hover:bg-zinc-200 text-zinc-900 text-sm font-medium transition-colors gap-2"
+                    >
+                      <i className="fa-solid fa-download text-xs"></i>
+                      Download
+                    </a>
+                    <button 
+                      onClick={onClose}
+                      className="h-9 w-9 inline-flex items-center justify-center rounded-md bg-zinc-800 hover:bg-red-900/50 text-zinc-400 hover:text-red-200 transition-colors"
+                    >
+                      <i className="fa-solid fa-xmark"></i>
+                    </button>
+                 </>
+               )}
+            </div>
          </div>
 
-         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 text-white/90 bg-gray-900/60 px-6 py-3 rounded-full backdrop-blur-xl text-sm font-medium border border-white/5 shadow-xl">
-           {title}
+         {/* Editor/View Area */}
+         <div className="relative flex-1 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden flex items-center justify-center">
+            {isCropping ? (
+              <div className="relative w-full h-full bg-[#0F1115] flex items-center justify-center p-4 overflow-auto">
+                 <ReactCrop
+                    crop={crop}
+                    onChange={(c) => setCrop(c)}
+                    onComplete={(c) => setCompletedCrop(c)}
+                    aspect={aspect}
+                 >
+                    <img ref={imgRef} src={result.imageUrl} alt={result.title} style={{ maxHeight: '75vh' }} />
+                 </ReactCrop>
+              </div>
+            ) : (
+               <img src={result.imageUrl} alt={result.title} className="max-w-full max-h-full object-contain bg-[#0F1115]" />
+            )}
          </div>
+
       </div>
     </div>
   );
 };
 
-const ImageCard: React.FC<{ result: ImageResult, onExpand: (url: string, title: string) => void, onEdit: (url: string) => void }> = ({ result, onExpand, onEdit }) => {
+const ImageCard: React.FC<{ result: ImageResult, onExpand: (id: string) => void }> = ({ result, onExpand }) => {
   const isComplete = result.status === 'complete';
   const isLoading = result.status === 'loading';
   const isError = result.status === 'error';
 
   return (
-    <div className={`relative group rounded-xl overflow-hidden bg-gray-900 border transition-all duration-500 ${isComplete ? 'border-gray-800 hover:border-indigo-500/30 hover:shadow-2xl hover:shadow-indigo-900/10' : 'border-gray-800'}`}>
+    <div className={`relative group rounded-lg border bg-zinc-900 transition-all duration-300 ${isComplete ? 'border-zinc-800 hover:border-zinc-600' : 'border-zinc-800'}`}>
       {/* Header Overlay */}
-      <div className="absolute top-0 left-0 right-0 p-3 z-10 flex justify-between items-start pointer-events-none">
-        <span className="text-[10px] uppercase tracking-wider font-bold text-white/80 bg-black/60 backdrop-blur-md px-2 py-1 rounded border border-white/5">
+      <div className="absolute top-2 left-2 z-10 pointer-events-none">
+        <div className="bg-zinc-950/80 backdrop-blur px-2 py-1 rounded text-[10px] font-medium text-zinc-300 border border-zinc-800/50 uppercase tracking-wider">
           {result.title}
-        </span>
+        </div>
       </div>
 
       {/* Image Area */}
-      <div className="aspect-square relative w-full bg-[#0F1115]">
+      <div className="aspect-square relative w-full bg-zinc-950/50 overflow-hidden rounded-t-lg">
         {isComplete && result.imageUrl ? (
           <img 
             src={result.imageUrl} 
             alt={result.title} 
-            className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 cursor-pointer"
-            onClick={() => onExpand(result.imageUrl!, result.title)}
+            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105 cursor-pointer"
+            onClick={() => onExpand(result.id)}
           />
         ) : (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-600">
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-4">
              {isLoading ? (
-               <div className="flex flex-col items-center px-4 text-center">
-                 <div className="w-10 h-10 border-2 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-3"></div>
-                 <span className="text-[10px] font-mono text-indigo-400 tracking-widest animate-pulse mb-1">GENERATING</span>
-                 {result.statusMessage && (
-                   <span className="text-[10px] text-gray-500 animate-pulse">{result.statusMessage}</span>
-                 )}
+               <div className="flex flex-col items-center text-center space-y-3">
+                 <Spinner />
+                 <div className="space-y-1">
+                    <div className="text-xs font-medium text-zinc-300">Processing</div>
+                    {result.statusMessage && (
+                      <div className="text-[10px] text-zinc-500">{result.statusMessage}</div>
+                    )}
+                 </div>
                </div>
              ) : isError ? (
-               <div className="flex flex-col items-center text-red-400/80 px-4 text-center w-full">
-                 <i className="fa-solid fa-triangle-exclamation text-xl mb-2"></i>
-                 <span className="text-[10px] uppercase tracking-wide mb-1">Failed</span>
-                 <span className="text-[9px] text-red-500/60 line-clamp-2 max-w-full break-words">{result.errorMsg}</span>
+               <div className="flex flex-col items-center text-red-400 text-center space-y-2">
+                 <i className="fa-solid fa-circle-exclamation"></i>
+                 <div className="text-[10px] max-w-full break-words opacity-80">{result.errorMsg}</div>
                </div>
              ) : (
-               <div className="flex flex-col items-center opacity-20">
-                 <i className="fa-regular fa-image text-2xl mb-2"></i>
-                 <span className="text-[10px] uppercase tracking-wide">Pending</span>
+               <div className="text-zinc-700 flex flex-col items-center gap-2">
+                 <i className="fa-regular fa-image text-lg"></i>
+                 <span className="text-[10px] font-medium uppercase tracking-widest opacity-50">Pending</span>
                </div>
              )}
           </div>
         )}
       </div>
 
-      {/* Actions Overlay (Hover) */}
-      {isComplete && (
-        <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center gap-3 backdrop-blur-[1px]">
-           <button 
-             className="w-12 h-12 rounded-full bg-black/50 text-white flex items-center justify-center hover:bg-yellow-600 transition-all shadow-lg border border-white/10 transform hover:scale-110"
-             onClick={() => onEdit(result.imageUrl!)}
-             title="Magic Edit"
-           >
-             <i className="fa-solid fa-wand-magic-sparkles"></i>
-           </button>
-           <button 
-             className="w-12 h-12 rounded-full bg-black/50 text-white flex items-center justify-center hover:bg-indigo-600 transition-all shadow-lg border border-white/10 transform hover:scale-110"
-             onClick={() => onExpand(result.imageUrl!, result.title)}
-             title="View Fullscreen"
-           >
-             <i className="fa-solid fa-expand"></i>
-           </button>
-        </div>
-      )}
+      {/* Footer Status / Actions */}
+      <div className="p-3 border-t border-zinc-800 flex items-center justify-between bg-zinc-900 rounded-b-lg">
+         <div className="flex items-center gap-2">
+           <div className={`w-1.5 h-1.5 rounded-full ${isComplete ? 'bg-emerald-500' : isLoading ? 'bg-amber-500 animate-pulse' : isError ? 'bg-red-500' : 'bg-zinc-700'}`}></div>
+           <span className="text-[10px] text-zinc-400 font-medium">
+             {isComplete ? 'Ready' : isLoading ? 'Generating' : isError ? 'Failed' : 'Queued'}
+           </span>
+         </div>
+         {isComplete && (
+            <button 
+              onClick={() => onExpand(result.id)}
+              className="text-zinc-400 hover:text-zinc-100 transition-colors"
+            >
+              <i className="fa-solid fa-expand text-xs"></i>
+            </button>
+         )}
+      </div>
     </div>
   );
 }
 
 function App() {
+  const [projectName, setProjectName] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [negativePrompt, setNegativePrompt] = useState('');
   const [refImage, setRefImage] = useState<string | null>(null);
+  const [isCroppingRef, setIsCroppingRef] = useState(false);
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>('1:1');
-  const [resolution, setResolution] = useState<ImageResolution>('1K');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [results, setResults] = useState<ImageResult[]>(
-    VARIANTS.map(v => ({ id: v.id, title: v.title, description: v.promptSuffix, status: 'idle', statusMessage: 'Waiting in queue...' }))
-  );
-  const [selectedImage, setSelectedImage] = useState<{url: string, title: string} | null>(null);
-  const [editingImage, setEditingImage] = useState<string | null>(null); // New state for editing
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
+  const stopGenerationRef = useRef(false);
   
-  const [useFallbackModel, setUseFallbackModel] = useState(false);
+  // Selection State - Initialize with LocalStorage logic
+  const [selectedVariantIds, setSelectedVariantIds] = useState<Set<string>>(() => {
+    try {
+        const saved = localStorage.getItem('producon-selected-variants');
+        if (saved) {
+            return new Set(JSON.parse(saved));
+        }
+    } catch (e) {
+        console.error("Failed to load saved selection", e);
+    }
+    // Default fallback if nothing in storage
+    return new Set(VARIANTS_LIB.filter(v => v.defaultSelected).map(v => v.id));
+  });
+  
+  const [expandedCategories, setExpandedCategories] = useState<Set<Category>>(new Set(['Core Product Angles', 'Lifestyle & Creative Shots']));
+
+  // Persist selection changes
+  useEffect(() => {
+    localStorage.setItem('producon-selected-variants', JSON.stringify(Array.from(selectedVariantIds)));
+  }, [selectedVariantIds]);
+
+  // Results State
+  const [results, setResults] = useState<ImageResult[]>([]);
+
+  // Derived selection
+  const selectedResult = useMemo(() => results.find(r => r.id === selectedResultId), [results, selectedResultId]);
+
+  // Group variants for UI
+  const variantsByCategory = useMemo(() => {
+    const groups: Record<string, VariantDef[]> = {};
+    VARIANTS_LIB.forEach(v => {
+      if (!groups[v.category]) groups[v.category] = [];
+      groups[v.category].push(v);
+    });
+    return groups;
+  }, []);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -361,39 +579,144 @@ function App() {
     }
   };
 
+  const toggleCategory = (cat: Category) => {
+    const next = new Set(expandedCategories);
+    if (next.has(cat)) next.delete(cat);
+    else next.add(cat);
+    setExpandedCategories(next);
+  };
+
+  const toggleVariant = (id: string) => {
+    const next = new Set(selectedVariantIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedVariantIds(next);
+  };
+
+  const handleSelectAllInCategory = (cat: Category, select: boolean) => {
+    const next = new Set(selectedVariantIds);
+    const catVariants = variantsByCategory[cat];
+    catVariants.forEach(v => {
+      if (select) next.add(v.id);
+      else next.delete(v.id);
+    });
+    setSelectedVariantIds(next);
+  }
+
+  const updateImageResult = (newUrl: string) => {
+    if (!selectedResultId) return;
+    setResults(prev => {
+        const next = [...prev];
+        const idx = next.findIndex(r => r.id === selectedResultId);
+        if (idx !== -1) {
+            next[idx] = { ...next[idx], imageUrl: newUrl };
+        }
+        return next;
+    });
+  };
+
+  const handleDownloadAll = () => {
+    const completed = results.filter(r => r.status === 'complete' && r.imageUrl);
+    if (completed.length === 0) return;
+    
+    const baseName = projectName || 'producon';
+
+    completed.forEach((result, index) => {
+      setTimeout(() => {
+        const link = document.createElement('a');
+        link.href = result.imageUrl!;
+        link.download = `${baseName.replace(/\s+/g, '-')}-${result.title.replace(/\s+/g, '-').toLowerCase()}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }, index * 300);
+    });
+  };
+
+  const handleDownloadZip = async () => {
+    const completed = results.filter(r => r.status === 'complete' && r.imageUrl);
+    if (completed.length === 0) return;
+
+    const zip = new JSZip();
+    const baseName = projectName ? projectName.replace(/\s+/g, '-') : 'producon';
+
+    completed.forEach(result => {
+        // Remove data:image/png;base64, prefix
+        const data = result.imageUrl!.split(',')[1];
+        const filename = `${baseName}-${result.title.replace(/\s+/g, '-').toLowerCase()}.png`;
+        zip.file(filename, data, {base64: true});
+    });
+
+    const blob = await zip.generateAsync({type: "blob"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    // If project name is provided, use that for the ZIP name. Else default to producon-assets.
+    a.download = projectName ? `${baseName}.zip` : `producon-assets.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleStop = () => {
+    stopGenerationRef.current = true;
+  };
+
   const handleGenerate = async () => {
     if (!prompt && !refImage) return;
-    setIsGenerating(true);
-    setUseFallbackModel(false);
+    if (selectedVariantIds.size === 0) {
+      alert("Please select at least one shot type.");
+      return;
+    }
 
-    setResults(prev => prev.map(r => ({ ...r, status: 'idle', imageUrl: undefined, errorMsg: undefined, statusMessage: 'Waiting...' })));
+    setIsGenerating(true);
+    stopGenerationRef.current = false;
+
+    const activeVariants = VARIANTS_LIB.filter(v => selectedVariantIds.has(v.id));
+    const initialResults: ImageResult[] = activeVariants.map(v => ({
+      id: v.id,
+      title: v.title,
+      description: v.promptSuffix,
+      status: 'idle',
+      statusMessage: 'Waiting...'
+    }));
+    setResults(initialResults);
 
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
-      for (let i = 0; i < VARIANTS.length; i++) {
-        const variant = VARIANTS[i];
+      for (let i = 0; i < activeVariants.length; i++) {
+        if (stopGenerationRef.current) break;
+
+        const variant = activeVariants[i];
         let attempt = 0;
         const maxRetries = 3;
         let success = false;
-        let currentUseFallback = useFallbackModel;
 
         while (attempt < maxRetries && !success) {
+            if (stopGenerationRef.current) break;
+
             try {
                 setResults(prev => {
                     const next = [...prev];
-                    next[i] = { 
-                        ...next[i], 
-                        status: 'loading',
-                        statusMessage: attempt > 0 
-                          ? `Retrying (${attempt}/${maxRetries})...` 
-                          : (currentUseFallback ? 'Rendering (Std)...' : 'Rendering (Pro)...')
-                    };
+                    const idx = next.findIndex(r => r.id === variant.id);
+                    if (idx !== -1) {
+                      next[idx] = { 
+                          ...next[idx], 
+                          status: 'loading',
+                          statusMessage: attempt > 0 ? `Retry (${attempt}/${maxRetries})` : 'Rendering...'
+                      };
+                    }
                     return next;
                 });
 
                 let desc = prompt ? `Product Description: ${prompt}.` : "Product Description: Analyze the reference image to generate the specific view of the product shown.";
-                const finalPrompt = `${desc} \n\nSpecific Shot Requirement: ${variant.promptSuffix} \n\n${GLOBAL_STYLE}`;
+                
+                // Append negative prompt
+                const neg = negativePrompt ? `\n\nNEGATIVE PROMPT (Strictly Avoid): ${negativePrompt}` : "";
+                
+                const finalPrompt = `${desc} \n\nSpecific Shot Requirement: ${variant.promptSuffix} \n\n${GLOBAL_STYLE}${neg}`;
                 
                 const parts: any[] = [{ text: finalPrompt }];
                 
@@ -407,23 +730,17 @@ function App() {
                     });
                 }
 
-                const modelName = currentUseFallback ? 'gemini-2.5-flash-image' : 'gemini-3-pro-image-preview';
-                
-                const config: any = {
-                    imageConfig: {
-                        aspectRatio: aspectRatio,
-                    }
-                };
-
-                if (!currentUseFallback) {
-                    config.imageConfig.imageSize = resolution;
-                }
+                // Exclusively use flash model, no imageSize config
+                const modelName = 'gemini-2.5-flash-image';
+                const config: any = { imageConfig: { aspectRatio: aspectRatio } };
 
                 const response = await ai.models.generateContent({
                     model: modelName,
                     contents: { parts },
                     config: config
                 });
+                
+                if (stopGenerationRef.current) break;
 
                 let imageUrl = '';
                 if (response.candidates && response.candidates[0]?.content?.parts) {
@@ -438,230 +755,346 @@ function App() {
                 if (imageUrl) {
                     setResults(prev => {
                         const next = [...prev];
-                        next[i] = { ...next[i], status: 'complete', imageUrl, statusMessage: 'Done' };
+                        const idx = next.findIndex(r => r.id === variant.id);
+                        if (idx !== -1) {
+                           next[idx] = { ...next[idx], status: 'complete', imageUrl, statusMessage: 'Done' };
+                        }
                         return next;
                     });
                     success = true;
-                    
-                    if (currentUseFallback) {
-                        setUseFallbackModel(true);
-                    }
-
                 } else {
-                    throw new Error("No image generated in response.");
+                    throw new Error("No image data received");
                 }
 
             } catch (err: any) {
-                console.warn(`Error generating ${variant.title} (Attempt ${attempt + 1}):`, err);
-                const errMsg = err.toString().toLowerCase();
-
-                if (!currentUseFallback && (errMsg.includes('403') || errMsg.includes('permission denied') || errMsg.includes('not found') || errMsg.includes('404'))) {
-                    console.log("Switching to Fallback (Flash) model.");
-                    currentUseFallback = true;
-                    setUseFallbackModel(true); 
-                    setResults(prev => {
-                        const next = [...prev];
-                        next[i] = { ...next[i], statusMessage: 'Switching to Standard Model...' };
-                        return next;
-                    });
-                    attempt++;
-                    continue; 
-                }
-
-                attempt++;
+                if (stopGenerationRef.current) break;
                 
+                console.warn(`Error ${variant.title}:`, err);
+                attempt++;
                 if (attempt >= maxRetries) {
                     setResults(prev => {
                         const next = [...prev];
-                        next[i] = { 
-                            ...next[i], 
-                            status: 'error', 
-                            errorMsg: err.message || 'Failed to generate',
-                            statusMessage: 'Failed'
-                        };
+                        const idx = next.findIndex(r => r.id === variant.id);
+                        if (idx !== -1) {
+                          next[idx] = { 
+                              ...next[idx], 
+                              status: 'error', 
+                              errorMsg: err.message || 'Failed',
+                              statusMessage: 'Failed'
+                          };
+                        }
                         return next;
                     });
                 } else {
-                    const delay = 2000 * Math.pow(1.5, attempt - 1);
-                    setResults(prev => {
-                        const next = [...prev];
-                        next[i] = { ...next[i], statusMessage: `Connection unstable. Retrying in ${Math.ceil(delay/1000)}s...` };
-                        return next;
-                    });
+                    const delay = 1500 * Math.pow(1.5, attempt - 1);
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
             }
         }
       }
-
     } catch (error) {
-      console.error("Global generation error:", error);
+      console.error("Global Error:", error);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const loadingIndex = results.findIndex(r => r.status === 'loading');
-  const buttonText = isGenerating 
-    ? (loadingIndex !== -1 ? `Generating Variant ${loadingIndex + 1}/${results.length}...` : 'Initializing...') 
-    : 'Generate Studio Set';
+  const loadingCount = results.filter(r => r.status === 'loading' || r.status === 'idle').length;
+  const completedCount = results.filter(r => r.status === 'complete').length;
 
   return (
-    <div className="min-h-screen bg-[#0B0F19] text-white selection:bg-indigo-500 selection:text-white">
-      {/* Header */}
-      <header className="border-b border-gray-800 bg-[#111827]/80 backdrop-blur-md sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
-               <i className="fa-solid fa-camera-retro text-white text-sm"></i>
-            </div>
-            <h1 className="font-bold text-xl tracking-tight">Lumina <span className="text-indigo-400 font-light">Studio</span></h1>
+    <div className="flex h-screen flex-col bg-zinc-950 text-zinc-50 selection:bg-zinc-800 selection:text-zinc-50 overflow-hidden">
+      
+      {/* Top Header */}
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-zinc-800 bg-zinc-950 px-6 z-20">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-zinc-50 rounded flex items-center justify-center shadow-sm">
+             <i className="fa-solid fa-cube text-zinc-900 text-sm"></i>
           </div>
-          <div className="flex items-center gap-4">
-            {isGenerating && (
-              <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-indigo-400 animate-pulse">
-                <i className="fa-solid fa-circle-notch fa-spin"></i> PROCESSING
-              </div>
-            )}
-            <div className="text-[10px] font-mono text-gray-500 border border-gray-800 px-2 py-1 rounded bg-black/20">
-              {useFallbackModel ? 'GEMINI-FLASH' : 'GEMINI-3-PRO'}
-            </div>
-          </div>
+          <h1 className="font-semibold text-lg tracking-tight text-zinc-100">Producon <span className="text-zinc-500 font-normal">Studio</span></h1>
+        </div>
+        <div className="flex items-center gap-3">
+           <Badge variant="secondary" className="h-7 font-mono">
+              FLASH
+           </Badge>
+           <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center border border-zinc-700">
+              <i className="fa-regular fa-user text-xs text-zinc-400"></i>
+           </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* Main Layout */}
+      <div className="flex flex-1 overflow-hidden">
         
-        {/* Controls Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-12">
+        {/* Left Sidebar */}
+        <aside className="w-[400px] flex flex-col border-r border-zinc-800 bg-zinc-900/30 flex-shrink-0 relative z-10">
           
-          {/* Input Panel */}
-          <div className="lg:col-span-1 space-y-6">
-            <div className="bg-gray-800/40 border border-gray-700 rounded-2xl p-6 shadow-xl backdrop-blur-sm">
-              <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                <i className="fa-solid fa-sliders text-indigo-400"></i> Configuration
-              </h2>
-              
-              {/* Product Description */}
-              <div className="space-y-2 mb-6">
-                <label className="text-xs font-medium text-gray-400 uppercase tracking-wide">Product Prompt</label>
-                <textarea
-                  className="w-full bg-gray-900/50 border border-gray-700 rounded-xl p-4 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all min-h-[120px] resize-none text-gray-200 placeholder-gray-600"
-                  placeholder="Describe your product, style, lighting, and specific details..."
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                />
-              </div>
-
-              {/* Settings Grid */}
-              <div className="grid grid-cols-2 gap-4 mb-6">
-                 <div className="space-y-2">
-                   <label className="text-xs font-medium text-gray-400 uppercase tracking-wide">Aspect Ratio</label>
-                   <div className="relative">
-                     <select 
-                       className="w-full bg-gray-900/50 border border-gray-700 rounded-xl px-3 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none text-gray-200 appearance-none cursor-pointer"
-                       value={aspectRatio}
-                       onChange={(e) => setAspectRatio(e.target.value as AspectRatio)}
-                     >
-                       <option value="1:1">Square (1:1)</option>
-                       <option value="16:9">Wide (16:9)</option>
-                       <option value="4:3">Standard (4:3)</option>
-                       <option value="3:4">Portrait (3:4)</option>
-                       <option value="9:16">Story (9:16)</option>
-                     </select>
-                     <i className="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500 pointer-events-none"></i>
-                   </div>
-                 </div>
-                 <div className="space-y-2">
-                   <label className="text-xs font-medium text-gray-400 uppercase tracking-wide">Resolution</label>
-                   <div className="relative">
-                     <select 
-                        className="w-full bg-gray-900/50 border border-gray-700 rounded-xl px-3 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none text-gray-200 appearance-none cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                        value={resolution}
-                        onChange={(e) => setResolution(e.target.value as ImageResolution)}
-                        disabled={useFallbackModel} 
-                      >
-                        <option value="1K">1K (Fast)</option>
-                        <option value="2K">2K (High)</option>
-                        <option value="4K">4K (Ultra)</option>
-                      </select>
-                      <i className="fa-solid fa-chevron-down absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500 pointer-events-none"></i>
-                   </div>
-                   {useFallbackModel && <p className="text-[9px] text-yellow-500 mt-1">Resolution unavailable in standard mode.</p>}
-                 </div>
-              </div>
-
-              {/* Reference Image Upload */}
-              <div className="space-y-2 pt-2">
-                <label className="text-xs font-medium text-gray-400 uppercase tracking-wide flex justify-between items-center">
-                  <span>Reference Image (Optional)</span>
-                  {refImage && <span className="text-indigo-400 text-[10px] cursor-pointer hover:text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded" onClick={() => setRefImage(null)}>CLEAR</span>}
-                </label>
-                <div className="relative group">
-                  <input 
-                    type="file" 
-                    accept="image/*"
-                    onChange={handleImageUpload}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                  />
-                  <div className={`w-full h-32 border-2 border-dashed rounded-xl flex flex-col items-center justify-center transition-all duration-300 ${refImage ? 'border-indigo-500/50 bg-indigo-500/5' : 'border-gray-700 hover:border-gray-500 bg-gray-900/30 hover:bg-gray-800/50'}`}>
-                    {refImage ? (
-                        <div className="relative w-full h-full p-2">
-                            <img src={refImage} alt="Reference" className="h-full w-full object-contain rounded-lg" />
-                            {/* Edit Ref Button */}
-                            <button 
-                                onClick={(e) => {
-                                    e.preventDefault();
-                                    setEditingImage(refImage);
-                                }}
-                                className="absolute bottom-2 right-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-full w-8 h-8 flex items-center justify-center shadow-lg z-20"
-                                title="Magic Edit this reference"
-                            >
-                                <i className="fa-solid fa-wand-magic-sparkles text-xs"></i>
-                            </button>
-                        </div>
-                    ) : (
-                      <>
-                         <i className="fa-regular fa-image text-2xl text-gray-500 mb-2 group-hover:text-gray-400 transition-colors"></i>
-                         <span className="text-xs text-gray-500 group-hover:text-gray-400 transition-colors">Click to upload reference</span>
-                      </>
-                    )}
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-8">
+              {/* Configuration Section */}
+              <div className="space-y-6">
+                  <div className="flex items-center gap-2 pb-2 border-b border-zinc-800/50">
+                      <i className="fa-solid fa-sliders text-zinc-500 text-xs"></i>
+                      <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Context</h2>
                   </div>
-                </div>
+                  
+                  {/* Project Name */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-medium text-zinc-300">Project Name</label>
+                    <input
+                      type="text"
+                      className="flex h-9 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-300 transition-all"
+                      placeholder="e.g. MyProduct V1"
+                      value={projectName}
+                      onChange={(e) => setProjectName(e.target.value)}
+                    />
+                  </div>
+
+                  {/* Prompt */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-medium text-zinc-300">Description</label>
+                    <textarea
+                      className="flex min-h-[100px] w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm shadow-sm placeholder:text-zinc-600 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-300 disabled:cursor-not-allowed disabled:opacity-50 resize-none transition-all"
+                      placeholder="Describe your product..."
+                      value={prompt}
+                      onChange={(e) => setPrompt(e.target.value)}
+                    />
+                  </div>
+                  
+                  {/* Negative Prompt */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-medium text-zinc-300">Negative Prompt</label>
+                    <input
+                      type="text"
+                      className="flex h-9 w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-zinc-300 transition-all"
+                      placeholder="e.g. hands, text, distortion, messy"
+                      value={negativePrompt}
+                      onChange={(e) => setNegativePrompt(e.target.value)}
+                    />
+                  </div>
+
+                  {/* Reference */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-medium text-zinc-300 flex justify-between items-center">
+                      <span>Reference</span>
+                      {refImage && (
+                        <div className="flex gap-3">
+                             <span className="text-zinc-500 hover:text-zinc-100 cursor-pointer transition-colors flex items-center gap-1" onClick={() => setIsCroppingRef(true)}>
+                                <i className="fa-solid fa-crop-simple text-[10px]"></i> Crop
+                             </span>
+                             <span className="text-zinc-500 hover:text-red-300 cursor-pointer transition-colors flex items-center gap-1" onClick={() => setRefImage(null)}>
+                                <i className="fa-solid fa-trash text-[10px]"></i> Remove
+                             </span>
+                        </div>
+                      )}
+                    </label>
+                    <div className="relative group">
+                       <input 
+                          type="file" 
+                          accept="image/*"
+                          onChange={handleImageUpload}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                          disabled={!!refImage}
+                       />
+                       <div className={`h-20 w-full rounded-md border border-dashed transition-all flex flex-col items-center justify-center gap-2 overflow-hidden ${refImage ? 'border-zinc-700 bg-zinc-900' : 'border-zinc-800 bg-zinc-950 hover:bg-zinc-900'}`}>
+                          {refImage ? (
+                            <img src={refImage} alt="Ref" className="h-full w-full object-cover opacity-70 group-hover:opacity-100 transition-opacity" />
+                          ) : (
+                            <>
+                              <i className="fa-solid fa-cloud-arrow-up text-zinc-600"></i>
+                              <span className="text-[10px] text-zinc-500">Upload Reference</span>
+                            </>
+                          )}
+                       </div>
+                    </div>
+                  </div>
+
+                  {/* Controls */}
+                  <div className="grid grid-cols-1 gap-4">
+                     <div className="space-y-2">
+                       <label className="text-xs font-medium text-zinc-300">Aspect</label>
+                       <div className="relative">
+                          <select 
+                            className="flex h-9 w-full items-center justify-between rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-300 disabled:cursor-not-allowed disabled:opacity-50 appearance-none"
+                            value={aspectRatio}
+                            onChange={(e) => setAspectRatio(e.target.value as AspectRatio)}
+                          >
+                            <option value="1:1">1:1 Square</option>
+                            <option value="16:9">16:9 Landscape</option>
+                            <option value="4:3">4:3 Standard</option>
+                            <option value="3:4">3:4 Portrait</option>
+                            <option value="9:16">9:16 Vertical</option>
+                          </select>
+                       </div>
+                     </div>
+                  </div>
               </div>
 
-              {/* Action Button */}
-              <button
-                onClick={handleGenerate}
-                disabled={isGenerating || (!prompt && !refImage)}
-                className={`w-full mt-6 py-4 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all shadow-lg text-sm tracking-wide
-                  ${isGenerating || (!prompt && !refImage)
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed border border-gray-700'
-                    : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white hover:shadow-indigo-500/25 shadow-indigo-900/20 active:scale-[0.98] border border-transparent'
-                  }`}
-              >
-                {isGenerating ? (
-                  <>
-                    <Spinner /> {buttonText}
-                  </>
-                ) : (
-                  <>
-                    <i className="fa-solid fa-wand-magic-sparkles"></i> {buttonText}
-                  </>
-                )}
-              </button>
-            </div>
-            
-            {/* Info Box */}
-            <div className="bg-indigo-900/10 border border-indigo-500/20 rounded-xl p-4 text-xs text-indigo-300/80 leading-relaxed flex gap-3">
-              <i className="fa-solid fa-circle-info mt-0.5"></i>
-              <span>
-                Generates 7 distinct variants sequentially. Use the <strong>Magic Edit</strong> button on any image to customize it further with AI.
-              </span>
-            </div>
+              {/* Shot List Section */}
+              <div className="space-y-4">
+                  <div className="flex items-center justify-between pb-2 border-b border-zinc-800/50">
+                      <div className="flex items-center gap-2">
+                        <i className="fa-solid fa-list-check text-zinc-500 text-xs"></i>
+                        <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Shot List</h2>
+                      </div>
+                      <span className="text-[10px] bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-400">{selectedVariantIds.size} Selected</span>
+                  </div>
+                  
+                  <div className="space-y-1">
+                    {(Object.keys(variantsByCategory) as Category[]).map(cat => {
+                      const isExpanded = expandedCategories.has(cat);
+                      const variants = variantsByCategory[cat];
+                      const allSelected = variants.every(v => selectedVariantIds.has(v.id));
+
+                      return (
+                        <div key={cat} className="mb-1">
+                          <div 
+                            className={`flex items-center justify-between px-3 py-2 rounded-md cursor-pointer transition-colors group ${isExpanded ? 'bg-zinc-800/40' : 'hover:bg-zinc-800/20'}`}
+                            onClick={() => toggleCategory(cat)}
+                          >
+                            <div className="flex items-center gap-3 overflow-hidden">
+                               <i className={`fa-solid fa-chevron-right text-[10px] text-zinc-500 transition-transform duration-200 shrink-0 ${isExpanded ? 'rotate-90' : ''}`}></i>
+                               <span className="text-xs font-medium text-zinc-300 group-hover:text-zinc-100 truncate">{cat}</span>
+                            </div>
+                            <button 
+                               onClick={(e) => { e.stopPropagation(); handleSelectAllInCategory(cat, !allSelected); }}
+                               className="text-[10px] text-zinc-500 hover:text-zinc-100 font-medium px-2 py-1 rounded hover:bg-zinc-700 transition-colors shrink-0"
+                            >
+                               {allSelected ? 'None' : 'All'}
+                            </button>
+                          </div>
+                          
+                          {isExpanded && (
+                            <div className="pl-4 pr-2 py-1 space-y-0.5 ml-3 border-l border-zinc-800 mt-1">
+                               {variants.map(v => {
+                                 const isSelected = selectedVariantIds.has(v.id);
+                                 return (
+                                   <div 
+                                     key={v.id} 
+                                     onClick={() => toggleVariant(v.id)}
+                                     className={`flex items-center gap-3 px-3 py-2 rounded-md cursor-pointer transition-all text-xs ${isSelected ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300'}`}
+                                   >
+                                      <div className={`h-3.5 w-3.5 shrink-0 rounded border flex items-center justify-center transition-colors ${isSelected ? 'bg-zinc-50 border-zinc-50 text-zinc-950' : 'border-zinc-700 bg-transparent'}`}>
+                                         {isSelected && <i className="fa-solid fa-check text-[9px]"></i>}
+                                      </div>
+                                      <span className="truncate">{v.title}</span>
+                                   </div>
+                                 );
+                               })}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+              </div>
           </div>
 
-          {/* Results Grid */}
-          <div className="lg:col-span-2">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text
+          {/* Fixed Footer Action */}
+          <div className="p-4 border-t border-zinc-800 bg-zinc-900/95 backdrop-blur">
+              {isGenerating ? (
+                  <button
+                    onClick={handleStop}
+                    className="w-full h-11 inline-flex items-center justify-center rounded-md text-sm font-semibold bg-red-950/40 text-red-200 border border-red-900 hover:bg-red-900/60 transition-colors shadow-sm"
+                  >
+                    <Spinner />
+                    <span className="ml-2">Stop Generating ({loadingCount})</span>
+                  </button>
+              ) : (
+                  <button
+                      onClick={handleGenerate}
+                      disabled={(!prompt && !refImage) || selectedVariantIds.size === 0}
+                      className={`w-full h-11 inline-flex items-center justify-center rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-zinc-300 disabled:pointer-events-none disabled:opacity-50
+                        ${(!prompt && !refImage) || selectedVariantIds.size === 0
+                          ? 'bg-zinc-800 text-zinc-500'
+                          : 'bg-zinc-50 text-zinc-950 hover:bg-zinc-200 shadow-sm'
+                        }`}
+                    >
+                      <i className="fa-solid fa-wand-magic-sparkles mr-2"></i>
+                      Generate Assets
+                  </button>
+              )}
+          </div>
+        </aside>
+
+        {/* Main Content (Gallery) */}
+        <main className="flex-1 overflow-y-auto bg-zinc-950 p-8 custom-scrollbar relative">
+           <div className="max-w-[1600px] mx-auto space-y-6">
+              {/* Gallery Header */}
+              <div className="flex items-center justify-between sticky top-0 z-10 bg-zinc-950/80 backdrop-blur py-4 border-b border-transparent transition-all">
+                <div>
+                  <h2 className="text-2xl font-semibold text-zinc-100 tracking-tight">Gallery</h2>
+                  <p className="text-sm text-zinc-500">Review and export your generated assets.</p>
+                </div>
+                <div className="flex gap-3">
+                   {completedCount > 0 && (
+                      <>
+                        <button 
+                          onClick={handleDownloadZip}
+                          className="h-9 px-4 inline-flex items-center justify-center rounded-md bg-zinc-100 text-sm font-medium text-zinc-900 shadow hover:bg-zinc-200 transition-colors"
+                        >
+                          <i className="fa-solid fa-file-zipper mr-2"></i>
+                          Download ZIP
+                        </button>
+                        <button 
+                          onClick={handleDownloadAll}
+                          className="h-9 px-3 inline-flex items-center justify-center rounded-md border border-zinc-800 bg-zinc-900 text-sm font-medium text-zinc-400 shadow-sm hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+                          title="Download as separate files"
+                        >
+                          <i className="fa-solid fa-download"></i>
+                        </button>
+                      </>
+                   )}
+                </div>
+              </div>
+              
+              {/* Gallery Grid */}
+              {results.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-900/20 min-h-[500px] flex flex-col items-center justify-center text-zinc-500 gap-6 mt-10">
+                  <div className="h-20 w-20 rounded-full bg-zinc-900 flex items-center justify-center border border-zinc-800">
+                     <i className="fa-solid fa-images text-3xl opacity-40"></i>
+                  </div>
+                  <div className="text-center space-y-2 max-w-md">
+                     <p className="text-base font-medium text-zinc-300">Workspace Empty</p>
+                     <p className="text-sm opacity-70">Configure your product details and select your desired shots from the sidebar to begin generating high-fidelity assets.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5 pb-20">
+                  {results.map((result) => (
+                    <ImageCard 
+                      key={result.id} 
+                      result={result} 
+                      onExpand={(id) => setSelectedResultId(id)}
+                    />
+                  ))}
+                </div>
+              )}
+           </div>
+        </main>
+      </div>
+
+      {selectedResult && (
+        <ImageModal 
+          result={selectedResult}
+          projectName={projectName}
+          onClose={() => setSelectedResultId(null)} 
+          onUpdate={updateImageResult}
+        />
+      )}
+
+      {isCroppingRef && refImage && (
+        <RefCropModal
+            imageUrl={refImage}
+            onClose={() => setIsCroppingRef(false)}
+            onSave={(newUrl) => {
+                setRefImage(newUrl);
+                setIsCroppingRef(false);
+            }}
+        />
+      )}
+    </div>
+  );
+}
+
+const root = createRoot(document.getElementById('root')!);
+root.render(<App />);

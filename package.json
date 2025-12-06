@@ -1,5 +1,5 @@
 {
-  "name": "app",
+  "name": "lumina-ai",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -11,7 +11,9 @@
   "dependencies": {
     "react-dom": "^19.2.0",
     "@google/genai": "^1.30.0",
-    "react": "^19.2.0"
+    "react": "^19.2.0",
+    "jszip": "3.10.1",
+    "react-image-crop": "11.0.6"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

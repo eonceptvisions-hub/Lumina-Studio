@@ -3,39 +3,55 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Lumina Product Studio</title>
+    <title>Producon Studio</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://unpkg.com/react-image-crop@11.0.6/dist/ReactCrop.css" />
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
       body {
         font-family: 'Inter', sans-serif;
-        background-color: #111827; /* Gray 900 */
-        color: #F3F4F6; /* Gray 100 */
+        background-color: #09090b; /* Zinc-950 */
+        color: #FAFAFA;
       }
-      /* Custom scrollbar for a cleaner look */
+      /* Custom scrollbar to match Shadcn dark theme */
       ::-webkit-scrollbar {
         width: 8px;
         height: 8px;
       }
       ::-webkit-scrollbar-track {
-        background: #1F2937; 
+        background: #18181b; 
       }
       ::-webkit-scrollbar-thumb {
-        background: #4B5563; 
+        background: #27272a; 
         border-radius: 4px;
       }
       ::-webkit-scrollbar-thumb:hover {
-        background: #6B7280; 
+        background: #3f3f46; 
+      }
+      
+      /* React Image Crop Customization */
+      .ReactCrop__crop-selection {
+        border: 2px solid #fafafa;
+        box-shadow: 0 0 0 9999em rgba(0, 0, 0, 0.7);
+      }
+      .ReactCrop__drag-handle {
+        background-color: #fafafa;
+        width: 8px;
+        height: 8px;
+        border: 1px solid #09090b;
       }
     </style>
   <script type="importmap">
 {
   "imports": {
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react-dom": "https://aistudiocdn.com/react-dom@^19.2.0",
     "@google/genai": "https://aistudiocdn.com/@google/genai@^1.30.0",
     "react/": "https://aistudiocdn.com/react@^19.2.0/",
-    "react": "https://aistudiocdn.com/react@^19.2.0"
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "jszip": "https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm",
+    "react-image-crop": "https://esm.sh/react-image-crop@11.0.6?external=react,react-dom"
   }
 }
 </script>
